@@ -1,16 +1,68 @@
-# Speech-to-Speech (STS) Assistant
+# Speech-to-Speech Assistant
 
-This repository contains two implementations of a Speech-to-Speech assistant:
+A voice-controlled AI assistant with both cloud and local implementations.
 
-1. `sts_local.py` - A fully local implementation using Ollama for LLM
-2. `sts_cloud.py` - A cloud-based implementation using OpenAI's services
+## Environment Setup
+
+1. Create a `.env` file in the project root:
+
+2. Add your OpenAI API key to the `.env` file:
+```
+OPENAI_API_KEY=your_openai_api_key_here
+```
+
+3. Install the required packages:
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Cloud Version with History
+```bash
+python sts_cloud_history.py
+```
+
+### Local Version with History
+```bash
+python sts_local_history.py
+```
+
+## Features
+
+- Wake word detection ("Hey robot", "Hey robo", "Wake up")
+- Speech recognition and synthesis
+- Conversation history
+- Interruption handling
+- Both cloud (OpenAI) and local (Ollama) implementations
+
+## History Features
+
+Both `sts_cloud_history.py` and `sts_local_history.py` include conversation history functionality:
+
+- Stores the last 10 interactions in memory
+- Persists conversations to JSON files:
+  - Cloud version: `conversation_history.json`
+  - Local version: `conversation_history_local.json`
+- Timestamps each interaction
+- Allows querying past conversations
+
+You can ask the robot about previous conversations:
+- "What was our first interaction?"
+- "What was our last interaction?"
+- "Tell me about our recent conversations"
+- "Repeat that" or "Say that again"
+
+## Security Note
+
+Never commit your `.env` file or expose your API keys. The `.env` file is included in `.gitignore` to prevent accidental commits.
 
 ## Common Prerequisites
 - Python 3.8 or higher
 - pip (Python package manager)
 - Microphone and speakers
 
-## Local Implementation (`sts_local.py`)
+## Local Implementation with History (`sts_local_history.py`)
 
 ### Prerequisites
 - Ollama installed (for local LLM support)
@@ -39,10 +91,10 @@ Required packages:
 - accelerate
 - llama-cpp-python
 
-### Running the Local Version
+### Running the Local Version with History
 
 ```bash
-python sts_local.py [options]
+python sts_local_history.py [options]
 ```
 
 Command-line options:
@@ -73,8 +125,9 @@ Quit Words:
 - Privacy-focused
 - Local speech recognition
 - Local text-to-speech
+- Conversation history storage and retrieval
 
-## Cloud Implementation (`sts_cloud.py`)
+## Cloud Implementation with History (`sts_cloud_history.py`)
 
 ### Prerequisites
 - OpenAI API key
@@ -98,10 +151,10 @@ Required packages:
 - python-dotenv (==1.0.1)
 - httpx (==0.26.0)
 
-### Running the Cloud Version
+### Running the Cloud Version with History
 
 ```bash
-python sts_cloud.py [options]
+python sts_cloud_history.py [options]
 ```
 
 Command-line options:
@@ -124,6 +177,7 @@ Stop Words:
 - Regular updates and improvements
 - Cloud-based processing
 - OpenAI's latest models
+- Conversation history storage and retrieval
 
 ## Troubleshooting
 
@@ -166,6 +220,7 @@ Both versions log their operation to `rainbow_robot.log`. The log includes:
 - Speech recognition results
 - System responses
 - Error messages
+- Conversation history operations
 
 ## Support
 
