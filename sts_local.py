@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-rainbow_local.py  –  100 % offline speech-to-speech assistant
-
-Usage examples
---------------
-python rainbow_local.py
-python rainbow_local.py --voice en_GB-alba-low --stt_model base.en --llm llama3
+This script is 100 % offline speech-to-speech assistant, that relies on whisper for stt, llama3 as LLM, and pyttsx3 as tts.
 """
 
 # ─────────── configuration ───────────
