@@ -1,0 +1,10 @@
+torch 
+transformers>=4.40
+faster-whisper>=1.0
+sounddevice
+numpy
+pyttsx3
+#piper-tts    
+pypiwin32         # Windows only; harmless on other OSes
+accelerate
+llama-cpp-python
