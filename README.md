@@ -173,7 +173,3 @@ For issues and support:
 1. Check the logs in `rainbow_robot.log`
 2. Review the documentation
 3. Open an issue in the repository
-
-## License
-
-[Add your license information here] 
