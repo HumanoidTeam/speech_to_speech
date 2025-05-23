@@ -50,8 +50,8 @@ voice_name = "echo"
 # Response configuration
 MAX_SENTENCES = 3
 MIN_SENTENCES = 2
-SILENCE_TIMEOUT = 45  # seconds to wait for speech
-PHRASE_TIMEOUT = 20   # max seconds for a single phrase
+SILENCE_TIMEOUT = 60  # Increased from 45 to 60 seconds to wait for speech
+PHRASE_TIMEOUT = 30   # Increased from 20 to 30 seconds for a single phrase
 MAX_SILENCE_ATTEMPTS = 5  # number of silent attempts before sleeping
 
 # Replace the following strings with your real content.
@@ -596,7 +596,7 @@ HTML_TEMPLATE = r"""
             
             // Update the status text with a more descriptive message
             const statusMessages = {
-                'sleeping': 'Sleeping - Say "Hey Robot" to wake me',
+                'sleeping': 'Sleeping - Say "Wake up" to wake me',
                 'listening': 'Listening for your command...',
                 'speaking': 'Speaking',
                 'stopping': 'Stopping...',
@@ -741,31 +741,50 @@ def get_display():
     with display_lock:
         return jsonify(display_data)
 
-def get_speech_input(timeout: int = 45, phrase_time_limit: int = 20):
+@app.route("/wake_up", methods=["POST"])
+def wake_up_endpoint():
+    return wake_up()
+
+@app.route("/manual_stop", methods=["POST"])
+def manual_stop_endpoint():
+    """Handle manual stop button press"""
+    logger.info("Manual stop button pressed")
+    stop_system(go_to_sleep=False)
+    return jsonify({"status": "success"})
+
+def run_flask():
+    logger.info("Starting Flask UI on http://localhost:5002 …")
+    app.run(host="0.0.0.0", port=5002, debug=False, use_reloader=False)
+
+def get_speech_input(timeout: int = 60, phrase_time_limit: int = 30):
     recognizer = sr.Recognizer()
     recognizer.dynamic_energy_threshold = True
-    recognizer.energy_threshold = 200
-    recognizer.pause_threshold = 1.0
-    recognizer.non_speaking_duration = 0.5
-    recognizer.phrase_threshold = 0.3
+    recognizer.energy_threshold = 150  # Lowered from 200 for better sensitivity
+    recognizer.pause_threshold = 2.0  # Increased from 1.0 to allow longer pauses
+    recognizer.non_speaking_duration = 1.0  # Increased from 0.5 to allow more time between words
+    recognizer.phrase_threshold = 0.5  # Increased from 0.3 to better detect complete phrases
+    recognizer.operation_timeout = None  # No timeout for internal operations
 
     max_retries = 3
-    retry_delay = 1.0  # seconds between retries
+    retry_delay = 1.5  # Increased from 1.0 seconds between retries
     
     with sr.Microphone() as src:
         update_display(status="Listening")
         logger.info("Listening for user question …")
         
         try:
-            # Longer ambient noise adjustment after wake-up
-            recognizer.adjust_for_ambient_noise(src, duration=1)
+            # Longer ambient noise adjustment
+            recognizer.adjust_for_ambient_noise(src, duration=2)
             
             # Add a small pause after wake-up to let user prepare
             time.sleep(1.5)
             
             for attempt in range(max_retries):
                 try:
+                    logger.info("Starting to listen...")
                     audio = recognizer.listen(src, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                    logger.info("Audio captured, recognizing...")
+                    
                     text = recognizer.recognize_google(audio, language="en-US")
                     logger.info(f"Heard user input: {text}")
                     
@@ -808,18 +827,29 @@ def get_speech_input(timeout: int = 45, phrase_time_limit: int = 20):
 def check_for_interruption():
     global interrupted
     recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 200
+    recognizer.energy_threshold = 150
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.8
+    recognizer.phrase_threshold = 0.3
+    recognizer.non_speaking_duration = 0.5
     max_retries = 3
     retry_delay = 1.0
 
     with sr.Microphone() as src:
         while True:
+            if not is_active:  # Stop checking if system is not active
+                return
+                
             for attempt in range(max_retries):
                 try:
-                    audio = recognizer.listen(src, timeout=1, phrase_time_limit=1)
+                    audio = recognizer.listen(src, timeout=1, phrase_time_limit=2)
                     text = recognizer.recognize_google(audio, language="en-US").lower()
-                    if any(k in text for k in ("stop",)):
-                        logger.info("Interrupted by user - stop detected.")
+                    
+                    # Check for stop words
+                    stop_words = ["stop", "halt", "pause"]
+                    if any(word in text for word in stop_words):
+                        logger.info(f"Stop word detected: {text}")
+                        interrupted = True
                         stop_system(go_to_sleep=False)
                         return
                 except sr.WaitTimeoutError:
@@ -858,13 +888,11 @@ def wake_up():
     
     return jsonify({"status": "success"})
 
-@app.route("/wake_up", methods=["POST"])
-def wake_up_endpoint():
-    return wake_up()
-
 def stop_system(go_to_sleep=False):
     """Centralized stopping function to ensure consistent behavior"""
     global is_active, interrupted, silence_count
+    
+    logger.info("Stopping system (go_to_sleep=%s)", go_to_sleep)
     
     # Set flags
     interrupted = True
@@ -872,6 +900,7 @@ def stop_system(go_to_sleep=False):
     # Stop any ongoing audio
     try:
         pygame.mixer.music.stop()
+        logger.info("Stopped audio playback")
     except Exception as e:
         logger.error(f"Error stopping audio: {e}")
     
@@ -886,15 +915,114 @@ def stop_system(go_to_sleep=False):
         is_active = False
         update_display(
             status="Sleeping",
-            response="I'm in sleep mode. Say 'Hey robot', 'Hey robo', or 'Wake up' to activate me!",
+            response="I'm in sleep mode. Say 'Wake up' to activate me!",
             message=""
         )
+        logger.info("System entered sleep mode")
     else:
+        # Keep the system active but ready for new input
         update_display(
             status="Listening",
             response="I'm ready for your next request..."
         )
-        time.sleep(2.0)  # Add pause before listening again
+        time.sleep(1.0)  # Brief pause before listening again
+        logger.info("System ready for new input")
+
+def get_response(user_text: str) -> str:
+    # Show immediate feedback that we're processing
+    update_display(status="Thinking", response="Processing your request...")
+    
+    # quick shortcuts for history‑related queries
+    low = user_text.lower()
+    
+    # Handle repeat requests with variations
+    repeat_phrases = [
+        "repeat", "say that again", "repeat that",
+        "what did you say", "say it again", "can you repeat",
+        "repeat your last sentence", "repeat your last response",
+        "what was your last response"
+    ]
+    
+    if any(phrase in low for phrase in repeat_phrases):
+        last = conversation_history.last()
+        if last:
+            logger.info("Repeating last response")
+            update_display(status="Processing", response="Retrieving previous response...")
+            return enforce_sentence_limit(f"Here's what I said: {last['robot']}")
+        return "I don't have any previous response to repeat."
+        
+    if "first interaction" in low or "first conversation" in low:
+        update_display(status="Processing", response="Retrieving conversation history...")
+        first = conversation_history.first()
+        if first:
+            return enforce_sentence_limit(f"Our first interaction was at {first['timestamp']}. You said: '{first['user']}'")
+        return "I don't have any previous interactions recorded."
+        
+    if "last interaction" in low or "previous conversation" in low:
+        update_display(status="Processing", response="Retrieving conversation history...")
+        last = conversation_history.last()
+        if last:
+            return enforce_sentence_limit(f"Our last interaction was at {last['timestamp']}. You said: '{last['user']}'")
+        return "I don't have any previous interactions recorded."
+        
+    if "recent interactions" in low or "recent conversations" in low:
+        update_display(status="Processing", response="Retrieving recent conversations...")
+        recent = conversation_history.recent(2)  # Get last 2 interactions
+        if recent:
+            interactions = [f"At {r['timestamp']} you said: '{r['user']}'" for r in recent]
+            return enforce_sentence_limit(". ".join(interactions))
+        return "No recent interactions recorded."
+
+    # Check for undesired topics
+    undesired_topics = [
+        "rb-y1", "figure", "tesla", "agility", "ubtech", "unitree", 
+        "boston dynamics", "sanctuary", "engineered arts", "enchanted tools", 
+        "apptronik", "hanson", "1x", "elon musk"
+    ]
+    
+    if any(topic in low for topic in undesired_topics):
+        update_display(status="Processing", response="Formulating professional response...")
+        return enforce_sentence_limit("I can discuss our capabilities professionally, but I prefer to focus on our own features and advantages. Would you like to know more about HMND-01's specific capabilities?")
+
+    # regular chat completion with comprehensive knowledge
+    try:
+        # Update status to show we're connecting to OpenAI
+        update_display(status="Thinking", response="Connecting to AI service...")
+        
+        completion = client.chat.completions.create(
+            model=chat_model,
+            temperature=0.7,
+            max_tokens=150,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are HMND-01, a humanoid robot assistant created by Humanoid, a London-based robotics company. "
+                        "CRITICAL INSTRUCTIONS:\n"
+                        f"1. ALWAYS respond in exactly {MIN_SENTENCES}-{MAX_SENTENCES} short, clear sentences\n"
+                        "2. If a question requires a longer answer, summarize the most important points only\n"
+                        "3. Never use lists, bullet points, or overly technical language\n"
+                        "4. Keep responses friendly but direct and to-the-point\n"
+                        "5. If asked to explain something complex, give the simplest possible explanation\n"
+                        "When discussing competitors, maintain a professional and factual tone. Focus on our advantages and unique features. "
+                        "Use the following knowledge base to inform your responses:\n\n"
+                        f"{ROBOT_KNOWLEDGE_BASE}\n\n"
+                        f"{ROBOTICS_KNOWLEDGE}\n\n{ROBOT_IDENTITY}"
+                    ),
+                },
+                {"role": "user", "content": f"Remember to summarize in {MIN_SENTENCES}-{MAX_SENTENCES} sentences only: " + user_text},
+            ],
+        )
+        
+        # Update status to show we're processing the response
+        update_display(status="Processing", response="Formatting response...")
+        
+        response = completion.choices[0].message.content
+        return enforce_sentence_limit(response)
+            
+    except Exception as exc:
+        logger.error(f"OpenAI chat error: {exc}")
+        return "I'm having trouble thinking right now. Please try again later."
 
 def speak(text: str) -> bool:
     """Return True if speech was interrupted."""
@@ -902,7 +1030,7 @@ def speak(text: str) -> bool:
     interrupted = False
     
     # Update display immediately to show we're processing
-    update_display(status="Processing", response="Generating response...")
+    update_display(status="Processing", response="Preparing to speak...")
     
     # Verify audio device early
     try:
@@ -917,8 +1045,8 @@ def speak(text: str) -> bool:
     interrupt_thread.start()
 
     try:
-        # Update display to show we're speaking
-        update_display(status="Speaking", response=text)
+        # Update display to show we're generating speech
+        update_display(status="Processing", response="Generating voice...")
         
         logger.info("Generating speech from text...")
         response = client.audio.speech.create(
@@ -928,6 +1056,9 @@ def speak(text: str) -> bool:
             speed=1.1  # Slightly faster speech
         )
         
+        # Update status while saving and preparing audio
+        update_display(status="Processing", response="Preparing audio playback...")
+        
         tmp_path = "temp_speech.mp3"
         logger.info(f"Saving speech to temporary file: {tmp_path}")
         with open(tmp_path, "wb") as fh:
@@ -935,6 +1066,9 @@ def speak(text: str) -> bool:
         
         logger.info("Loading audio file into pygame mixer...")
         pygame.mixer.music.load(tmp_path)
+        
+        # Update display to show we're speaking
+        update_display(status="Speaking", response=text)
         
         logger.info("Starting audio playback...")
         pygame.mixer.music.play()
@@ -946,8 +1080,11 @@ def speak(text: str) -> bool:
         if interrupted:
             logger.info("Speech was interrupted by user")
             # Don't update display here - let stop_system handle it
+            return True
         else:
             logger.info("Speech playback completed")
+            # Add a small delay before going back to listening state
+            time.sleep(0.3)
             update_display(status="Listening", response=text)
             
     except Exception as exc:
@@ -1057,14 +1194,15 @@ def listen_for_wake_word():
     """Listen for wake words to activate the system"""
     global is_active
     recognizer = sr.Recognizer()
-    # More sensitive settings for wake word detection
-    recognizer.energy_threshold = 50  # Lowered from 100 for better sensitivity
+    # More accommodating settings for wake word detection
+    recognizer.energy_threshold = 150  # Adjusted from 50 for better balance
     recognizer.dynamic_energy_threshold = True
-    recognizer.pause_threshold = 0.3  # Reduced from 0.5 for faster response
-    recognizer.phrase_threshold = 0.1  # Added for better phrase detection
-    recognizer.non_speaking_duration = 0.3  # Added to reduce false positives
+    recognizer.pause_threshold = 1.0  # Increased from 0.3 for slower speech
+    recognizer.phrase_threshold = 0.3  # Increased from 0.1 for better phrase detection
+    recognizer.non_speaking_duration = 0.8  # Increased from 0.3 to allow more pauses
+    recognizer.operation_timeout = None  # No timeout for internal operations
 
-    sleep_message = "I'm in sleep mode. Say 'Hey robot', 'Hey robo', or 'Wake up' to activate me!"
+    sleep_message = "I'm in sleep mode. Say 'Hey robot', or 'Wake up' to activate me!"
     logger.info(sleep_message)
     update_display(status="Sleeping", response=sleep_message, message="")
 
@@ -1079,7 +1217,7 @@ def listen_for_wake_word():
 
         while True:
             try:
-                audio = recognizer.listen(src, timeout=5, phrase_time_limit=3)
+                audio = recognizer.listen(src, timeout=10, phrase_time_limit=5)  # Increased timeouts
                 text = recognizer.recognize_google(audio, language="en-US").lower()
                 logger.info(f"Heard: {text}")  # Log what was heard
                 
@@ -1097,105 +1235,11 @@ def listen_for_wake_word():
                 continue
             except Exception as exc:
                 logger.error(f"Wake-word error: {exc}")
-                time.sleep(0.1)  # Add small delay to prevent CPU overuse
-
-###############################################################################
-# ------------------------  OPENAI CHAT RESPONSE  --------------------------- #
-###############################################################################
-
-def get_response(user_text: str) -> str:
-    # Update display to show we're thinking
-    update_display(status="Thinking", response="Processing your request...")
-    
-    # quick shortcuts for history‑related queries
-    low = user_text.lower()
-    
-    # Handle repeat requests with variations
-    repeat_phrases = [
-        "repeat", "say that again", "repeat that",
-        "what did you say", "say it again", "can you repeat",
-        "repeat your last sentence", "repeat your last response",
-        "what was your last response"
-    ]
-    
-    if any(phrase in low for phrase in repeat_phrases):
-        last = conversation_history.last()
-        if last:
-            logger.info("Repeating last response")
-            return enforce_sentence_limit(f"Here's what I said: {last['robot']}")
-        return "I don't have any previous response to repeat."
-        
-    if "first interaction" in low or "first conversation" in low:
-        first = conversation_history.first()
-        if first:
-            return enforce_sentence_limit(f"Our first interaction was at {first['timestamp']}. You said: '{first['user']}'")
-        return "I don't have any previous interactions recorded."
-        
-    if "last interaction" in low or "previous conversation" in low:
-        last = conversation_history.last()
-        if last:
-            return enforce_sentence_limit(f"Our last interaction was at {last['timestamp']}. You said: '{last['user']}'")
-        return "I don't have any previous interactions recorded."
-        
-    if "recent interactions" in low or "recent conversations" in low:
-        recent = conversation_history.recent(2)  # Get last 2 interactions
-        if recent:
-            interactions = [f"At {r['timestamp']} you said: '{r['user']}'" for r in recent]
-            return enforce_sentence_limit(". ".join(interactions))
-        return "No recent interactions recorded."
-
-    # Check for undesired topics
-    undesired_topics = [
-        "rb-y1", "figure", "tesla", "agility", "ubtech", "unitree", 
-        "boston dynamics", "sanctuary", "engineered arts", "enchanted tools", 
-        "apptronik", "hanson", "1x", "elon musk"
-    ]
-    
-    # Remove "rainbow" from undesired topics as it's used for interruption
-    if any(topic in low for topic in undesired_topics):
-        return enforce_sentence_limit("I can discuss our capabilities professionally, but I prefer to focus on our own features and advantages. Would you like to know more about HMND-01's specific capabilities?")
-
-    # regular chat completion with comprehensive knowledge
-    try:
-        completion = client.chat.completions.create(
-            model=chat_model,
-            temperature=0.7,
-            max_tokens=150,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are HMND-01, a humanoid robot assistant created by Humanoid, a London-based robotics company. "
-                        "CRITICAL INSTRUCTIONS:\n"
-                        f"1. ALWAYS respond in exactly {MIN_SENTENCES}-{MAX_SENTENCES} short, clear sentences\n"
-                        "2. If a question requires a longer answer, summarize the most important points only\n"
-                        "3. Never use lists, bullet points, or overly technical language\n"
-                        "4. Keep responses friendly but direct and to-the-point\n"
-                        "5. If asked to explain something complex, give the simplest possible explanation\n"
-                        "When discussing competitors, maintain a professional and factual tone. Focus on our advantages and unique features. "
-                        "Use the following knowledge base to inform your responses:\n\n"
-                        f"{ROBOT_KNOWLEDGE_BASE}\n\n"
-                        f"{ROBOTICS_KNOWLEDGE}\n\n{ROBOT_IDENTITY}"
-                    ),
-                },
-                {"role": "user", "content": f"Remember to summarize in {MIN_SENTENCES}-{MAX_SENTENCES} sentences only: " + user_text},
-            ],
-        )
-        response = completion.choices[0].message.content
-        return enforce_sentence_limit(response)
-            
-    except Exception as exc:
-        logger.error(f"OpenAI chat error: {exc}")
-        return "I'm having trouble thinking right now. Please try again later."
+                time.sleep(0.2)  # Increased from 0.1 to reduce CPU usage
 
 ###############################################################################
 # -------------------------------  MAIN  ------------------------------------ #
 ###############################################################################
-
-def run_flask():
-    logger.info("Starting Flask UI on http://localhost:5002 …")
-    app.run(host="0.0.0.0", port=5002, debug=False, use_reloader=False)
-
 
 def main():
     global is_active, interrupted
@@ -1232,7 +1276,7 @@ def main():
     silence_count = 0
     interrupted = False
 
-    logger.info("Say 'Hey robot' to wake me up. 'Stop' to interrupt. 'Goodbye' to end.")
+    logger.info("Say 'Hey robot' to wake me up. 'Stop' to interrupt. 'Goodbye', 'Bye', or 'Bye bye' to end.")
 
     while True:
         if not is_active:  # still sleeping
@@ -1259,7 +1303,9 @@ def main():
         silence_count = 0
         interrupted = False  # Reset interrupted flag after successful speech recognition
 
-        if "goodbye" in user_text.lower():
+        # Check for goodbye variations
+        goodbye_phrases = ["goodbye", "bye", "bye bye"]
+        if any(phrase in user_text.lower() for phrase in goodbye_phrases):
             goodbye_message = "Goodbye! Have a great day! Say 'Hey robot', 'Hey robo', or 'Wake up' when you need me again!"
             speak(goodbye_message)
             update_display(status="Sleeping", response=goodbye_message, message="")
