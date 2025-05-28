@@ -48,11 +48,11 @@ chat_model = "gpt-4o-mini"
 voice_name = "echo"
 
 # Response configuration
-MAX_SENTENCES = 3
+MAX_SENTENCES = 2
 MIN_SENTENCES = 2
-SILENCE_TIMEOUT = 60  # Increased from 45 to 60 seconds to wait for speech
-PHRASE_TIMEOUT = 30   # Increased from 20 to 30 seconds for a single phrase
-MAX_SILENCE_ATTEMPTS = 5  # number of silent attempts before sleeping
+SILENCE_TIMEOUT = 20  # Reduced from 60 to 20 seconds for more natural interaction
+PHRASE_TIMEOUT = 10   # Reduced from 30 to 10 seconds for faster response
+MAX_SILENCE_ATTEMPTS = 3  # Reduced from 5 to 3 for quicker sleep mode
 
 # Replace the following strings with your real content.
 ROBOTICS_KNOWLEDGE = """[Previous robotics knowledge content …]"""
@@ -749,7 +749,7 @@ def wake_up_endpoint():
 def manual_stop_endpoint():
     """Handle manual stop button press"""
     logger.info("Manual stop button pressed")
-    stop_system(go_to_sleep=False)
+    trigger_stop()
     return jsonify({"status": "success"})
 
 def run_flask():
@@ -757,36 +757,57 @@ def run_flask():
     app.run(host="0.0.0.0", port=5002, debug=False, use_reloader=False)
 
 def get_speech_input(timeout: int = 60, phrase_time_limit: int = 30):
+    global is_speaking
+    
+    # Don't listen while robot is speaking to prevent feedback loop
+    if is_speaking:
+        logger.info("Skipping speech input - robot is currently speaking")
+        return None
+    
     recognizer = sr.Recognizer()
     recognizer.dynamic_energy_threshold = True
     recognizer.energy_threshold = 150  # Lowered from 200 for better sensitivity
-    recognizer.pause_threshold = 2.0  # Increased from 1.0 to allow longer pauses
-    recognizer.non_speaking_duration = 1.0  # Increased from 0.5 to allow more time between words
-    recognizer.phrase_threshold = 0.5  # Increased from 0.3 to better detect complete phrases
+    recognizer.pause_threshold = 1.5  # Reduced from 2.0 for faster response
+    recognizer.non_speaking_duration = 0.8  # Reduced from 1.0 for quicker detection
+    recognizer.phrase_threshold = 0.4  # Reduced from 0.5 for better phrase detection
     recognizer.operation_timeout = None  # No timeout for internal operations
 
-    max_retries = 3
-    retry_delay = 1.5  # Increased from 1.0 seconds between retries
+    max_retries = 2  # Reduced from 3 for faster interaction
+    retry_delay = 1.0  # Reduced from 1.5 seconds between retries
     
     with sr.Microphone() as src:
         update_display(status="Listening")
         logger.info("Listening for user question …")
         
         try:
-            # Longer ambient noise adjustment
-            recognizer.adjust_for_ambient_noise(src, duration=2)
+            # Adaptive ambient noise adjustment
+            since_speech = time.time() - last_speech_time
+            adj_duration = 0.3 if since_speech < 2.0 else 0.8
+            recognizer.adjust_for_ambient_noise(src, duration=adj_duration)
             
-            # Add a small pause after wake-up to let user prepare
-            time.sleep(1.5)
+            # No extra sleep; begin listening immediately
             
             for attempt in range(max_retries):
+                # Check again if robot started speaking during our attempts
+                if is_speaking:
+                    logger.info("Aborting speech input - robot started speaking")
+                    return None
+                    
                 try:
                     logger.info("Starting to listen...")
-                    audio = recognizer.listen(src, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                    # Use more reasonable timeouts
+                    audio = recognizer.listen(src, timeout=15, phrase_time_limit=10)  # Reduced timeouts
                     logger.info("Audio captured, recognizing...")
                     
                     text = recognizer.recognize_google(audio, language="en-US")
                     logger.info(f"Heard user input: {text}")
+
+                    # --- stop-word handling while listening ---
+                    if any(w in text.lower() for w in ("stop", "halt", "pause", "wait", "cancel")):
+                        logger.info("Stop word detected during listening → %s", text)
+                        trigger_stop()
+                        return None
+                    # -------------------------------------------------
                     
                     # Check if the input contains wake words
                     wake_words = ["hey robot", "hey robo", "wake up"]
@@ -809,7 +830,7 @@ def get_speech_input(timeout: int = 60, phrase_time_limit: int = 30):
                 except ConnectionError as e:
                     logger.error(f"Connection error (attempt {attempt + 1}/{max_retries}): {e}")
                     if attempt < max_retries - 1:
-                        time.sleep(retry_delay * 2)  # Longer delay for connection errors
+                        time.sleep(retry_delay)  # Reduced delay
                     continue
                 except Exception as exc:
                     logger.error(f"Recognizer error: {exc}")
@@ -824,53 +845,11 @@ def get_speech_input(timeout: int = 60, phrase_time_limit: int = 30):
             logger.error(f"Critical error in speech input: {exc}")
             return None
 
-def check_for_interruption():
-    global interrupted
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 150
-    recognizer.dynamic_energy_threshold = True
-    recognizer.pause_threshold = 0.8
-    recognizer.phrase_threshold = 0.3
-    recognizer.non_speaking_duration = 0.5
-    max_retries = 3
-    retry_delay = 1.0
-
-    with sr.Microphone() as src:
-        while True:
-            if not is_active:  # Stop checking if system is not active
-                return
-                
-            for attempt in range(max_retries):
-                try:
-                    audio = recognizer.listen(src, timeout=1, phrase_time_limit=2)
-                    text = recognizer.recognize_google(audio, language="en-US").lower()
-                    
-                    # Check for stop words
-                    stop_words = ["stop", "halt", "pause"]
-                    if any(word in text for word in stop_words):
-                        logger.info(f"Stop word detected: {text}")
-                        interrupted = True
-                        stop_system(go_to_sleep=False)
-                        return
-                except sr.WaitTimeoutError:
-                    continue
-                except sr.UnknownValueError:
-                    continue
-                except ConnectionError as e:
-                    logger.error(f"Connection error in interruption check (attempt {attempt + 1}/{max_retries}): {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * 2)
-                    continue
-                except Exception as e:
-                    logger.error(f"Error in interruption check: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                    continue
-
 def wake_up():
     """Handle the wake-up sequence"""
-    global is_active
+    global is_active, activation_time, stop_thread_running
     is_active = True
+    activation_time = time.time()
     update_display(status="Active", message="Manual wake up")
     
     # Add a delay before starting to speak
@@ -885,6 +864,13 @@ def wake_up():
     
     # Add a delay to let the greeting complete
     time.sleep(2.0)
+    
+    # # start continuous stop monitor once
+    # # continuous stop monitor removed – stop word now detected inside get_speech_input
+    
+    # if not stop_thread_running:
+    #     stop_thread_running = True
+    #     threading.Thread(target=_always_on_stop_listener, daemon=True).start()
     
     return jsonify({"status": "success"})
 
@@ -932,7 +918,7 @@ def get_response(user_text: str) -> str:
     # Show immediate feedback that we're processing
     update_display(status="Thinking", response="Processing your request...")
     
-    # quick shortcuts for history‑related queries
+    # quick shortcuts for history-related queries
     low = user_text.lower()
     
     # Handle repeat requests with variations
@@ -999,7 +985,7 @@ def get_response(user_text: str) -> str:
                     "content": (
                         "You are HMND-01, a humanoid robot assistant created by Humanoid, a London-based robotics company. "
                         "CRITICAL INSTRUCTIONS:\n"
-                        f"1. ALWAYS respond in exactly {MIN_SENTENCES}-{MAX_SENTENCES} short, clear sentences\n"
+                        "1. ALWAYS respond in exactly 2 short, clear sentences\n"
                         "2. If a question requires a longer answer, summarize the most important points only\n"
                         "3. Never use lists, bullet points, or overly technical language\n"
                         "4. Keep responses friendly but direct and to-the-point\n"
@@ -1024,10 +1010,45 @@ def get_response(user_text: str) -> str:
         logger.error(f"OpenAI chat error: {exc}")
         return "I'm having trouble thinking right now. Please try again later."
 
+## --- Energy-based interrupt listener (moved up) --------------
+
+def _energy_interrupt():
+    """Stop playback on any short burst of voice energy while robot is speaking."""
+    with sr.Microphone() as mic:
+        r = sr.Recognizer()
+        r.energy_threshold = 50          # very sensitive
+        r.dynamic_energy_threshold = False
+        r.pause_threshold = 0.1
+        r.non_speaking_duration = 0.05
+        r.adjust_for_ambient_noise(mic, duration=0.2)
+        stop_keywords = ("stop", "halt", "pause", "quiet", "silence", "wait", "cancel")
+        while pygame.mixer.music.get_busy() and not interrupted:
+            try:
+                # Listen up to 1 s but abort if no speech after 0.3 s – balances speed and accuracy
+                audio = r.listen(mic, timeout=0.5, phrase_time_limit=0.7)
+                try:
+                    text = r.recognize_google(audio, language="en-US").lower()
+                    logger.info(f"Energy-interrupt heard: {text}")
+                    if any(w in text for w in stop_keywords):
+                        logger.info("Stop keyword detected during speaking → %s", text)
+                        trigger_stop()
+                        break
+                except sr.UnknownValueError:
+                    # Sound detected but not understood – ignore
+                    continue
+            except sr.WaitTimeoutError:
+                continue
+            except Exception as exc:
+                logger.error(f"Energy interrupt error: {exc}")
+                continue
+
+# ------------------------------------------------------------------
+
 def speak(text: str) -> bool:
     """Return True if speech was interrupted."""
-    global interrupted
+    global interrupted, is_speaking
     interrupted = False
+    is_speaking = True  # Set flag to prevent listening to own speech
     
     # Update display immediately to show we're processing
     update_display(status="Processing", response="Preparing to speak...")
@@ -1038,12 +1059,10 @@ def speak(text: str) -> bool:
         logger.info("Audio system initialized successfully")
     except Exception as e:
         logger.error(f"Audio system not initialized: {e}")
+        is_speaking = False
         return False
 
-    # start background interruption listener
-    interrupt_thread = threading.Thread(target=check_for_interruption, daemon=True)
-    interrupt_thread.start()
-
+    # threading.Thread(target=check_for_interruption, daemon=True).start()
     try:
         # Update display to show we're generating speech
         update_display(status="Processing", response="Generating voice...")
@@ -1073,24 +1092,30 @@ def speak(text: str) -> bool:
         logger.info("Starting audio playback...")
         pygame.mixer.music.play()
         
+        # Launch energy-based interrupt listener NOW so it runs during playback
+        threading.Thread(target=_energy_interrupt, daemon=True).start()
+        
         # Wait for audio to finish or interruption
         while pygame.mixer.music.get_busy() and not interrupted:
             time.sleep(0.1)
             
         if interrupted:
             logger.info("Speech was interrupted by user")
-            # Don't update display here - let stop_system handle it
+            is_speaking = False
             return True
         else:
             logger.info("Speech playback completed")
-            # Add a small delay before going back to listening state
-            time.sleep(0.3)
+            # Mark speech finished time
+            global last_speech_time
+            last_speech_time = time.time()
             update_display(status="Listening", response=text)
             
     except Exception as exc:
         logger.error(f"TTS failure: {exc}")
+        is_speaking = False
         return False
     finally:
+        is_speaking = False  # Always clear the flag
         try:
             pygame.mixer.music.unload()
             if os.path.exists(tmp_path):
@@ -1098,7 +1123,6 @@ def speak(text: str) -> bool:
                 logger.info("Temporary audio file cleaned up")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-
     return interrupted
 
 ###############################################################################
@@ -1183,6 +1207,10 @@ except:
 
 interrupted = False  # set by check_for_interruption()
 silence_count = 0  # Add silence_count to globals
+is_speaking = False  # Add flag to prevent listening to own speech
+activation_time = 0  # Track when robot was activated
+last_speech_time = 0  # Track when the last TTS playback finished
+stop_thread_running = False  # Ensure single continuous stop-listener
 
 ###############################################################################
 # -----------------------------  LISTENING  --------------------------------- #
@@ -1192,7 +1220,7 @@ is_active = False  # becomes True after wake word
 
 def listen_for_wake_word():
     """Listen for wake words to activate the system"""
-    global is_active
+    global is_active, activation_time, stop_thread_running
     recognizer = sr.Recognizer()
     # More accommodating settings for wake word detection
     recognizer.energy_threshold = 150  # Adjusted from 50 for better balance
@@ -1225,9 +1253,18 @@ def listen_for_wake_word():
                 wake_words = ["hey robot", "hey robo", "wake up"]
                 if any(wake_word in text for wake_word in wake_words):
                     is_active = True
+                    activation_time = time.time()
                     logger.info("Wake word detected - robot active")
                     update_display(status="Active", message="Wake word")
+                    
+                    # Speak the greeting and wait for it to complete
                     speak("Hello! I am HMND-01, your humanoid robot assistant. How can I help you today?")
+                    
+                    # Add extra delay to ensure audio has completely finished
+                    time.sleep(1.0)
+                    
+                    # Now set the flag to allow normal conversation
+                    logger.info("Greeting completed, ready for conversation")
                     break
             except sr.WaitTimeoutError:
                 continue
@@ -1242,7 +1279,7 @@ def listen_for_wake_word():
 ###############################################################################
 
 def main():
-    global is_active, interrupted
+    global is_active, interrupted, silence_count, activation_time
     parser = argparse.ArgumentParser(description="HMND‑01 Voice Assistant with Web UI")
     parser.add_argument("--message", type=str, help="Speak a single message then exit")
     args = parser.parse_args()
@@ -1269,7 +1306,7 @@ def main():
         speak(args.message)
         return
 
-    # launch wake‑word listener
+    # launch wake-word listener
     wake_thread = threading.Thread(target=listen_for_wake_word, daemon=True)
     wake_thread.start()
 
@@ -1283,6 +1320,11 @@ def main():
             time.sleep(0.1)
             continue
 
+        # Skip listening while the robot is still speaking (prevents self-feedback)
+        if is_speaking:
+            time.sleep(0.1)
+            continue
+
         user_text = get_speech_input(timeout=SILENCE_TIMEOUT, phrase_time_limit=PHRASE_TIMEOUT)
         if not user_text:
             silence_count += 1
@@ -1293,12 +1335,15 @@ def main():
                 time.sleep(0.5)  # Brief pause to show transition
                 update_display(status="Sleeping", response=sleep_message, message="")
                 is_active = False
+                silence_count = 0  # Reset silence count
                 wake_thread = threading.Thread(target=listen_for_wake_word, daemon=True)
                 wake_thread.start()
             else:
-                remaining = MAX_SILENCE_ATTEMPTS - silence_count
-                speak(f"I didn't catch that. Please try again. You have {remaining} more attempts before I go to sleep.")
+                # Skip verbal prompt to avoid unwanted "I didn't catch that" messages
+                logger.info("No user input detected – waiting quietly (silence_count=%s)", silence_count)
+                time.sleep(PHRASE_TIMEOUT)
             continue
+
 
         silence_count = 0
         interrupted = False  # Reset interrupted flag after successful speech recognition
@@ -1306,10 +1351,11 @@ def main():
         # Check for goodbye variations
         goodbye_phrases = ["goodbye", "bye", "bye bye"]
         if any(phrase in user_text.lower() for phrase in goodbye_phrases):
-            goodbye_message = "Goodbye! Have a great day! Say 'Hey robot', 'Hey robo', or 'Wake up' when you need me again!"
+            goodbye_message = "Goodbye! Have a great day! Say 'Hey robot', or 'Wake up' when you need me again!"
             speak(goodbye_message)
             update_display(status="Sleeping", response=goodbye_message, message="")
             is_active = False
+            silence_count = 0  # Reset silence count
             wake_thread = threading.Thread(target=listen_for_wake_word, daemon=True)
             wake_thread.start()
             continue
@@ -1320,8 +1366,68 @@ def main():
 
         if interrupted_speech:
             logger.info("Speech was interrupted by the user.")
+        else:
+            # Brief pause to let audio device settle
+            time.sleep(0.2)
 
+# ## --- Simple voice-stop listener -----------------------------------
 
+# def _speaker_interrupt_listener():
+#     global interrupted
+#     rec = sr.Recognizer()
+#     rec.energy_threshold = 60          # super-sensitive
+#     rec.dynamic_energy_threshold = False
+#     rec.pause_threshold = 0.2
+#     rec.non_speaking_duration = 0.1
+
+#     with sr.Microphone() as mic:
+#         rec.adjust_for_ambient_noise(mic, duration=0.2)
+#         while pygame.mixer.music.get_busy() and not interrupted:
+#             try:
+#                 # if we hear ANY short burst of voice energy, stop
+#                 rec.listen(mic, timeout=0.3, phrase_time_limit=0.7)
+#                 trigger_stop()        # identical to manual button
+#             except sr.WaitTimeoutError:
+#                 continue
+#             except Exception:
+#                 continue
+
+# def _always_on_stop_listener():
+#     """Runs while robot is awake; stops on any stop/halt/pause keyword."""
+#     global interrupted
+#     r = sr.Recognizer()
+#     r.energy_threshold = 70
+#     r.pause_threshold = 0.2
+#     r.non_speaking_duration = 0.2
+#     with sr.Microphone() as mic:
+#         r.adjust_for_ambient_noise(mic, duration=0.4)
+#         while is_active:
+#             try:
+#                 audio = r.listen(mic, timeout=0.6, phrase_time_limit=1.0)
+#                 text = r.recognize_google(audio, language="en-US").lower()
+#                 if any(w in text for w in ("stop", "halt", "pause")):
+#                     logger.info("Global stop detected → %s", text)
+#                     trigger_stop()
+#             except (sr.WaitTimeoutError, sr.UnknownValueError):
+#                 continue
+#             except Exception:
+#                 continue
+
+# -------------------------------------------------------------------
+# ------------------ Unified STOP helper ------------------
+
+def trigger_stop():
+    """Immediate stop action used by both manual button and voice keyword."""
+    global interrupted
+    interrupted = True
+    try:
+        pygame.mixer.music.stop()
+    except Exception:
+        pass
+    stop_system(go_to_sleep=False)
+
+# ----------------------------------------------------------
 if __name__ == "__main__":
     main()
+
 
